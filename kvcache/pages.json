@@ -1,0 +1,15 @@
+{
+  "site": "https://cozypet.github.io/articles",
+  "folder": "kvcache",
+  "series": "The Vocabulary of an Inference Engineer",
+  "links": {
+    "PART_1_URL": "",
+    "PART_2_URL": "",
+    "PART_3_URL": ""
+  },
+  "pages": [
+    {"source": "source/part-2-memory.md", "out": "part2"},
+    {"source": "source/part-3-reuse.md", "out": "part3"},
+    {"source": "source/part-4-transfer-offload.md", "out": "part4"}
+  ]
+}

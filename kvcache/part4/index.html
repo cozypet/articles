@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A Cache Is Only Worth What It Costs to Keep and Move</title>
+<meta name="author" content="Han HELOIR YAN, Ph.D.">
+<meta name="description" content="The Vocabulary of an Inference Engineer, Part 4 of 4: Transfer and Offload">
+<meta property="og:title" content="A Cache Is Only Worth What It Costs to Keep and Move">
+<meta property="og:description" content="The Vocabulary of an Inference Engineer, Part 4 of 4: Transfer and Offload">
+<meta property="og:type" content="article">
+<style>
+body { max-width: 740px; margin: 0 auto; padding: 40px 20px; font-family: Georgia, serif; font-size: 18px; line-height: 1.65; color: #141413; background: #faf9f5; }
+h1 { font-size: 34px; line-height: 1.2; }
+h2 { font-size: 26px; margin-top: 44px; }
+img { max-width: 100%; height: auto; display: block; margin: 28px auto; }
+em.sub { font-size: 20px; color: #5c5b55; }
+a { color: #d97757; }
+</style>
+</head>
+<body>
+
+<h1>A Cache Is Only Worth What It Costs to Keep and Move</h1>
+<p><em class="sub">The Vocabulary of an Inference Engineer, Part 4 of 4: Transfer and Offload</em></p>
+<p>On October 12, 2026, the vLLM engine shipped a feature whose release notes contain an unusual number: 64. When two machines could share a piece of work, and the piece is smaller than 64 tokens, the engine doesn't share it. It does the work again, because fetching that little costs more than repeating it.</p>
+<p>That number is a price list in one line. Computing something, storing it and moving it each have a cost, and an inference platform is always choosing the cheapest of the three.</p>
+<p>This is the last of four parts. Part 1 was about time: how one GPU is shared between many requests. Part 2 was about memory: where a model keeps its working notes. Part 3 was about reuse: how an engine recognizes work it has already done. This part is about keeping that work and moving it, between two groups of GPUs and down to cheaper memory. It ends with the bill for the whole series.</p>
+<p>The series follows Banque Valmont, a bank invented for the purpose, which runs its models on its own GPUs so that its data and its machines stay under its own control.</p>
+<h2>Before we start!</h2>
+<p>🦸🏻‍♀️ If this helps you ship better AI systems:</p>
+<ul>
+<li>👏 Clap 50 times (yes, you can!) - Medium's algorithm favors this, increasing visibility to others who then discover the article.</li>
+<li>🔔 Follow me on <a href="https://medium.com/@han.heloir">Medium</a>, <a href="https://www.linkedin.com/in/hanheloiryan/">LinkedIn</a> and <a href="https://medium.com/@han.heloir/about">subscribe</a> to get my latest article.</li>
+</ul>
+<h2>What Carries Over From Parts 1 to 3</h2>
+<p><strong>The terms below come from the first three parts and are used here without being explained again.</strong></p>
+<p>A <strong>GPU</strong> is the kind of chip these models run on. Its memory holds the model and the working notes of every request being served.</p>
+<p>A <strong>token</strong> is the unit a model reads and writes: a word, part of a word, or a punctuation mark. A <strong>pass</strong> is one run of the text through the model.</p>
+<p><strong>Attention</strong> is how a token takes the earlier tokens into account. Each token leaves behind a <strong>key</strong> and a <strong>value</strong>. They never change once computed, so the engine stores them in GPU memory. That store is the <strong>KV cache</strong>, and it's the model's working notes on a conversation.</p>
+<p>A request is served in two phases. <strong>Prefill</strong> reads the whole prompt in one pass and fills the KV cache. <strong>Decode</strong> writes the answer one token per pass.</p>
+<p>Part 1 ended with <strong>prefill and decode separation</strong>: one group of GPUs does only prefill, another does only decode, and the KV cache is sent from the first to the second over the network.</p>
+<p>Part 2 showed that the cache is stored in <strong>blocks</strong>, pieces of memory of fixed size, and that each request has a <strong>block table</strong> listing which blocks hold its cache.</p>
+<p>Part 3 added <strong>prefix caching</strong>. When two prompts start with the same text, the engine keeps the KV cache of that shared beginning and skips its prefill the second time. Part 3 also introduced the <strong>router</strong>, the component that decides which machine serves each request.</p>
+<h2>Two Way KV Transfer: Turn Two Pays for Turn One</h2>
+<p><strong>Separating prefill and decode has a cost that only shows up in conversations.</strong></p>
+<p>A <strong>turn</strong> is one message from the user and the model's answer to it. A model keeps nothing in mind between turns. At turn two, the whole conversation so far is sent again as the prompt: the first message, the first answer, and the new message.</p>
+<p>A relationship manager at Valmont asks why a client was charged 15 euros. With separation, the prefill GPUs read the question and the decode GPUs write the answer. The KV cache of that answer was built on the decode GPUs, one token at a time, and it exists only there.</p>
+<p>Turn two is "Draft the refund letter." The prompt now contains the first answer. It goes to the prefill GPUs, as every prompt does. They never computed that answer and hold no cache for it. Without help, they compute it from scratch, while the decode GPUs next door already have it.</p>
+<img alt="The Answer Lives on the Wrong Side" src="https://cozypet.github.io/articles/kvcache/images/30.png">
+<p>In Part 1, the cache moved one way: from prefill to decode. In October 2026, vLLM <a href="https://vllm.ai/blog/2026-10-12-bidirectional-kvxfer-multiturn-agentic-workload">added the other direction</a>. At turn two, the prefill side first fetches the existing cache from the decode side. It computes only the new message. Then it sends that new part back, so decode can carry on.</p>
+<img alt="Pull, Compute, Send" src="https://cozypet.github.io/articles/kvcache/images/31.png">
+<p>The release reports a time to first token, the wait before the first word appears, up to 3.3 times shorter on long conversations.</p>
+<p>It also sets the threshold this part opened with. If fewer than 64 tokens could be reused, the prefill side doesn't fetch anything and computes them itself. Asking another machine for a cache takes a fixed amount of time, and for a very small cache that time is longer than the computation.</p>
+<p>That threshold states the rule behind most of this series. Moving a cache and computing it again are two prices for the same result, and the engine pays the lower one.</p>
+<h2>KV Offload: Move the Cache, Don't Delete It</h2>
+<p><strong>Every form of reuse in Part 3 assumed the cache was still there.</strong></p>
+<p>GPU memory is limited, and new requests keep arriving. When the engine needs room, it deletes cached data. That's called <strong>eviction</strong>. The first thing to go is cache that no running request is using.</p>
+<p>Take the Q3 credit risk report, 3,000 tokens long, that Valmont's risk analysts query during the day. By Monday evening, its cache is exactly that. Nobody has asked about the report for hours, so the engine evicts it. On Tuesday at 9:00, an analyst asks to compare the report with Q2. The cache is gone, and the 3,000 token prefill runs again.</p>
+<img alt="Evicted Overnight" src="https://cozypet.github.io/articles/kvcache/images/32.png">
+<p><strong>KV offload</strong> moves the blocks instead of deleting them. A GPU machine has other places to keep data. Its CPU memory is the ordinary memory every server has. It's much larger than GPU memory and much cheaper. Below that is the disk, larger and cheaper again, and slower.</p>
+<p>With offload, a cache that leaves the GPU goes down to CPU memory or to disk. When a later request matches it, the blocks are loaded back onto the GPU, and the prefill is skipped.</p>
+<img alt="Move It Down, Not Out" src="https://cozypet.github.io/articles/kvcache/images/33.png">
+<p>vLLM can offload to CPU memory by itself. <a href="https://docs.vllm.ai/en/latest/examples/disaggregated/lmcache/">LMCache</a>, a companion project, adds disk and storage shared between machines. Shared storage also eases the routing problem from Part 3, where a request sent to a machine without the cache paid for a full prefill. A cache written by machine A can now be loaded by machine B, so the "wrong" machine costs a load instead.</p>
+<img alt="Any Machine Can Load It" src="https://cozypet.github.io/articles/kvcache/images/34.png">
+<p>Offload is worth it for as long as loading a cache is faster than computing it again. For a 3,000 token report, it is. For a short prompt it may not be, which is the 64 token rule seen from another side.</p>
+<h2>HiSparse: Keep the History Off the GPU</h2>
+<p><strong>Offload applies to requests that are idle. A few newer models allow it for a request that's still running.</strong></p>
+<p>This last technique is the most specialized in the series. It applies to one family of models, and it's here to show where the field is heading.</p>
+<p>In standard attention, every new token looks at the entire history. So the whole KV cache of a running request has to sit on the GPU, ready to be read at every step.</p>
+<p><strong>Sparse attention</strong> reads only part of the history. Some models, such as DeepSeek V3.2, are built this way from the start. They contain a small component called an <strong>indexer</strong>. At each step, the indexer gives every past token a quick score, and full attention then runs only on the few tokens that scored highest.</p>
+<img alt="Attention That Reads a Few" src="https://cozypet.github.io/articles/kvcache/images/35.png">
+<p>If most of the cache isn't read at a given step, most of it doesn't need to be on the GPU. SGLang's <a href="https://www.lmsys.org/blog/2026-04-10-sglang-hisparse/">HiSparse</a> uses that. It keeps the full KV cache in CPU memory and only a small working buffer on the GPU. The indexer's own keys stay on the GPU, because the indexer reads all of them at every step.</p>
+<img alt="Full History on CPU, Working Set on GPU" src="https://cozypet.github.io/articles/kvcache/images/36.png">
+<p>At each step, the indexer picks its tokens. Those already in the GPU buffer are used directly. Those that aren't are copied up from CPU memory. Everything the indexer didn't pick stays where it is.</p>
+<img alt="Fetch Only What's Missing" src="https://cozypet.github.io/articles/kvcache/images/37.png">
+<p>The limits are specific, and the <a href="https://docs.sglang.io/docs/advanced_features/hisparse_guide">SGLang guide</a> states them. HiSparse runs on the decode side only, and it requires prefill and decode separation. It supports a named list of sparse attention models and no others. It adds overhead when few requests are running at once. It's built for many long conversations in parallel, and it isn't something to switch on by default.</p>
+<h2>The Bill Never Disappears</h2>
+<p><strong>Across all four parts, no technique removed a cost. Each one moved it.</strong></p>
+<p>Continuous batching filled idle seats and let heavy prefills into light batches. Separation ended that interference and added a transfer. Paging ended the empty space and added a lookup. KV quantization halved the memory and added a risk to accuracy. Prefix caching removed computation and took memory. Offload freed memory and added loading time.</p>
+<img alt="Every Fix Moves the Bill" src="https://cozypet.github.io/articles/kvcache/images/38.png">
+<p>This is why another company's configuration rarely transfers. A bank whose assistants share one long compliance prompt gains most from prefix caching and cache aware routing. A bank whose analysts submit 100,000 token credit files runs out of memory before anything else matters.</p>
+<p>It's also why the role exists. The papers are public and the engines are free. What can't be downloaded is the knowledge of which trade a given workload needs.</p>
+<p>The starting point is the symptom. Measure where the platform is slow, then choose the technique that gives back the resource you're short of.</p>
+<img alt="Start From Where It's Slow" src="https://cozypet.github.io/articles/kvcache/images/39.png">
+<p>A decode step still fetches everything to write one token. What changed since 2022 is how many requests share that fetch, how much there is to fetch, and how often the same work is done twice. Each of those changes has a price, and it's usually in a column nobody was watching.</p>
+<h2>A Vocabulary Is Not the Job</h2>
+<p><strong>These four parts covered how an engine schedules requests and manages the KV cache. The role asks for more.</strong></p>
+<p>Three subjects are missing. Speculative decoding has a small model guess several tokens ahead and the large model check them in one pass. Weight quantization stores the model itself in fewer bits, where Part 2 only shrank the cache. Kernel work, such as FlashAttention, rewrites the attention computation so that less data moves in and out of GPU memory.</p>
+<p>The next step is free. Philip Kiely's <a href="https://www.baseten.co/inference-engineering/">Inference Engineering</a> covers the whole field, from GPUs to production, and can be read online. It assumes you know what a transformer is and what latency and throughput mean. This series was written to get you there.</p>
+<p>After that, the engines are the textbook. vLLM and SGLang are open source, and the <a href="https://docs.vllm.ai/en/latest/getting_started/quickstart/">vLLM quickstart</a> serves a model on a single GPU. Their release notes will read differently now. Each one describes a trade, and you can name both sides.</p>
+<p>The role takes the model as given and is measured on what each GPU and each dollar produces. That starts with being able to read the bill.</p>
+<h2>Credits and Further Reading</h2>
+<ul>
+<li><a href="https://vllm.ai/blog/2026-10-12-bidirectional-kvxfer-multiturn-agentic-workload">vLLM, two way KV transfer</a>, October 2026. Source for the 3.3 times figure and the 64 token threshold.</li>
+<li><a href="https://docs.vllm.ai/en/latest/examples/disaggregated/lmcache/">LMCache with vLLM</a>. Source for offload to disk and shared storage.</li>
+<li><a href="https://www.lmsys.org/blog/2026-04-10-sglang-hisparse/">SGLang HiSparse</a> and the <a href="https://docs.sglang.io/docs/advanced_features/hisparse_guide">HiSparse guide</a>. Sources for the design and its limits.</li>
+<li><a href="https://www.baseten.co/inference-engineering/">Inference Engineering</a> by Philip Kiely. The free book recommended in the last section.</li>
+</ul>
+<p>Banque Valmont and every request attributed to it are invented. Token counts and block sizes in the diagrams are examples unless a source is named.</p>
+
+</body>
+</html>
