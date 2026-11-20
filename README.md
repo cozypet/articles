@@ -2,6 +2,8 @@
 
 Source pages for the Medium articles of Han HELOIR YAN, Ph.D. (Signal Over Noise).
 
+Live site: https://cozypet.github.io/articles/
+
 Each article lives in its own folder. A page built here is read once by Medium's import tool, which brings the text and the images into a draft.
 
 ## Layout
